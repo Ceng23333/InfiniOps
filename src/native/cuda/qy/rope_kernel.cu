@@ -1,9 +1,12 @@
 #include "native/cuda/qy/rope_kernel.h"
 
 #include "native/cuda/qy/data_type_.h"
+#include "native/cuda/qy/rope_thread_per_item.cuh"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -143,6 +146,53 @@ void launchRope(void *out, const void *in, const int64_t *pos_ids,
 }
 
 }  // namespace
+
+template <typename T, bool IsGptJ>
+void launchStrided(void *out, const void *in, const int64_t *pos_ids,
+                   const void *sin_table, const void *cos_table, size_t seqlen,
+                   size_t nhead, size_t head_dim, int64_t stride0,
+                   int64_t stride1, void *stream) {
+  const char *small_block = std::getenv("INFINI_QY_ROPE_SMALL_BLOCK");
+  const int threads = small_block && std::strcmp(small_block, "1") == 0 ? 64 : 1024;
+  detail::ropeThreadPerItemKernel<IsGptJ, T, int64_t, T>
+      <<<dim3(seqlen, nhead), threads, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+          static_cast<T *>(out), static_cast<const T *>(in), pos_ids,
+          static_cast<const T *>(sin_table), static_cast<const T *>(cos_table),
+          head_dim / 2, 0, false, false, 0, stride0, stride1, 0, stride0, stride1);
+}
+
+void rope_strided_launch(void *out, const void *in, const int64_t *pos_ids,
+                         const void *sin_table, const void *cos_table,
+                         size_t seqlen, size_t nhead, size_t head_dim,
+                         int64_t stride0, int64_t stride1, int64_t stride2,
+                         int algo_tag, int dtype_tag, void *stream) {
+  if (stride2 != 1 || (head_dim & 1) || (algo_tag != 0 && algo_tag != 1)) {
+    throw std::invalid_argument("QY strided RoPE requires unit inner stride, even head dimension, and GPT_J/GPT_NEOX");
+  }
+  if (!seqlen || !nhead || !head_dim) {
+    return;
+  }
+  auto launch = [&](auto value) {
+    using T = decltype(value);
+    if (algo_tag == 0) {
+      launchStrided<T, true>(out, in, pos_ids, sin_table, cos_table, seqlen,
+                             nhead, head_dim, stride0, stride1, stream);
+    } else {
+      launchStrided<T, false>(out, in, pos_ids, sin_table, cos_table, seqlen,
+                              nhead, head_dim, stride0, stride1, stream);
+    }
+  };
+  switch (static_cast<infini::rt::DataType>(dtype_tag)) {
+    case infini::rt::DataType::kFloat16: launch(half{}); break;
+    case infini::rt::DataType::kBFloat16: launch(cuda_bfloat16{}); break;
+    case infini::rt::DataType::kFloat32: launch(float{}); break;
+    default: throw std::invalid_argument("QY strided RoPE: unsupported dtype");
+  }
+  const auto status = cudaGetLastError();
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string("QY strided RoPE launch: ") + cudaGetErrorString(status));
+  }
+}
 
 void rope_launch(void *out, const void *in, const int64_t *pos_ids,
                  const void *sin_table, const void *cos_table, size_t seqlen,

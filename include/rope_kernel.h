@@ -15,6 +15,12 @@ void rope_launch(void *out, const void *in, const int64_t *pos_ids,
                  size_t nhead, size_t head_dim, int algo_tag, int dtype_tag,
                  void *stream);
 
+void rope_strided_launch(void *out, const void *in, const int64_t *pos_ids,
+                         const void *sin_table, const void *cos_table,
+                         size_t seqlen, size_t nhead, size_t head_dim,
+                         int64_t stride0, int64_t stride1, int64_t stride2,
+                         int algo_tag, int dtype_tag, void *stream);
+
 }  // namespace infini::ops::qy
 
 #endif  // INFINI_OPS_ROPE_KERNEL_H_

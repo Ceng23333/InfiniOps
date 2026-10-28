@@ -26,6 +26,21 @@ __device__ __forceinline__ T SiluAndMulSigmoid(const T& x) {
   }
 }
 
+template <Device::Type kDev, typename T>
+__device__ __forceinline__ T SiluAndMulValue(T gate, T up) {
+  if constexpr (IsFP16<kDev, T> || IsBFloat16<kDev, T>) {
+    float gatef = Caster<kDev>::template Cast<float>(gate);
+    float upf = Caster<kDev>::template Cast<float>(up);
+    float sigf = __frcp_rn(__fadd_rn(1.0f, __expf(-gatef)));
+    return Caster<kDev>::template Cast<T>(
+        __fmul_rn(__fmul_rn(gatef, sigf), upf));
+  } else if constexpr (std::is_same_v<T, float>) {
+    return __fmul_rn(__fmul_rn(gate, SiluAndMulSigmoid<kDev>(gate)), up);
+  } else {
+    return gate * SiluAndMulSigmoid<kDev>(gate) * up;
+  }
+}
+
 }  // namespace detail
 
 template <Device::Type kDev, typename T, unsigned int BLOCK_SIZE>
@@ -65,18 +80,7 @@ __global__ void SiluAndMulKernel(T* __restrict__ out,
     T gate = input[gate_idx];
     T up = input[up_idx];
 
-    if constexpr (IsFP16<kDev, T> || IsBFloat16<kDev, T>) {
-      float gatef = Caster<kDev>::template Cast<float>(gate);
-      float upf = Caster<kDev>::template Cast<float>(up);
-      float sigf = __frcp_rn(__fadd_rn(1.0f, __expf(-gatef)));
-      out[out_idx] = Caster<kDev>::template Cast<T>(
-          __fmul_rn(__fmul_rn(gatef, sigf), upf));
-    } else if constexpr (std::is_same_v<T, float>) {
-      out[out_idx] =
-          __fmul_rn(__fmul_rn(gate, detail::SiluAndMulSigmoid<kDev>(gate)), up);
-    } else {
-      out[out_idx] = gate * detail::SiluAndMulSigmoid<kDev>(gate) * up;
-    }
+    out[out_idx] = detail::SiluAndMulValue<kDev>(gate, up);
   }
 }
 
